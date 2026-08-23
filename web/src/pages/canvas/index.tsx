@@ -35,6 +35,15 @@ export default function CanvasPage() {
         navigate(`/canvas/${id}${agentQuery}`);
     };
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
+
+    useEffect(() => {
+        if (!hydrated || autoOpenRef.current) return;
+        const raw = window.sessionStorage.getItem("temu:creative-pending-context");
+        if (!raw) return;
+        autoOpenRef.current = true;
+        const id = createProject("商品创作工作区");
+        navigate(`/canvas/${id}`);
+    }, [createProject, hydrated, navigate]);
     const importCanvas = async (file?: File) => {
         if (!file) return;
         try {

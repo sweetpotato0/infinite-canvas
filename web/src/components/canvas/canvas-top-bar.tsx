@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
+import { BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Save, Trash2, Undo2, Upload } from "lucide-react";
 import { Button, Dropdown, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -28,6 +28,9 @@ export function CanvasTopBar({
     onOpenPlugins,
     onUndo,
     onRedo,
+    creativeSessionActive,
+    creativeSaving,
+    onSaveCreativeVersion,
     agentOpen,
     compactAgentStatus,
     onToggleAgent,
@@ -50,6 +53,9 @@ export function CanvasTopBar({
     onOpenPlugins: () => void;
     onUndo: () => void;
     onRedo: () => void;
+    creativeSessionActive: boolean;
+    creativeSaving: boolean;
+    onSaveCreativeVersion: () => void;
     agentOpen: boolean;
     compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
     onToggleAgent: () => void;
@@ -139,6 +145,18 @@ export function CanvasTopBar({
                 </div>
 
                 <div className="pointer-events-auto flex items-center gap-1.5">
+                    {creativeSessionActive ? (
+                        <Tooltip title="保存当前图片到 ERP 待审核版本">
+                            <Button
+                                type="primary"
+                                loading={creativeSaving}
+                                icon={<Save className="size-4" />}
+                                onClick={onSaveCreativeVersion}
+                            >
+                                保存到 ERP
+                            </Button>
+                        </Tooltip>
+                    ) : null}
                     <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
                     <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
                     <Button

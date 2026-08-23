@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { uploadImage } from "@/services/image-storage";
+import { getImageBlob, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -126,6 +126,47 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+
+type CreativeContext = {
+    requestId: string;
+    sessionId: number;
+    assetId: number;
+    sourceMediaId?: number;
+    sourceUrl: string;
+    productTitle?: string;
+    returnMode?: string;
+};
+
+type CreativeUploadResult = {
+    objectKey: string;
+    url: string;
+    contentType: string;
+    size: number;
+    width?: number;
+    height?: number;
+    hashValue?: string;
+};
+
+type CreativeVersionResult = {
+    id: number;
+    status: string;
+};
+
+async function uploadCreativeVersion(sessionId: number, blob: Blob) {
+    const form = new FormData();
+    form.append("file", blob, "canvas-result.png");
+    const uploadResponse = await fetch(`/api/v1/product-creative/sessions/${sessionId}/upload`, { method: "POST", body: form, credentials: "include" });
+    if (!uploadResponse.ok) throw new Error((await uploadResponse.json().catch(() => null))?.error || "上传创作结果失败");
+    const upload = (await uploadResponse.json()) as CreativeUploadResult;
+    const versionResponse = await fetch(`/api/v1/product-creative/sessions/${sessionId}/versions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ objectKey: upload.objectKey, url: upload.url, mediaType: "gallery", mimeType: upload.contentType, fileSize: upload.size, width: upload.width, height: upload.height, hashValue: upload.hashValue }),
+    });
+    if (!versionResponse.ok) throw new Error((await versionResponse.json().catch(() => null))?.error || "创建商品图片版本失败");
+    return (await versionResponse.json()) as CreativeVersionResult;
+}
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -238,6 +279,8 @@ function InfiniteCanvasPage() {
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
+    const [creativeContext, setCreativeContext] = useState<CreativeContext | null>(null);
+    const [creativeSaving, setCreativeSaving] = useState(false);
 
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
@@ -250,6 +293,13 @@ function InfiniteCanvasPage() {
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    const pendingCreativeContextRef = useRef<CreativeContext | null>(null);
+    const importedCreativeRequestIdRef = useRef<string | null>(null);
+
+    const sendCreativeMessage = useCallback((message: Record<string, unknown>) => {
+        if (window.parent === window) return;
+        window.parent.postMessage(message, window.location.origin);
+    }, []);
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -353,6 +403,64 @@ function InfiniteCanvasPage() {
         };
         void restore();
     }, [hydrated, navigate, openProject, projectId]);
+
+    const importCreativeContext = useCallback(async (context: CreativeContext) => {
+        if (importedCreativeRequestIdRef.current === context.requestId) return;
+        importedCreativeRequestIdRef.current = context.requestId;
+        try {
+            const response = await fetch(context.sourceUrl, { credentials: "include" });
+            if (!response.ok) throw new Error("商品图片读取失败");
+            const sourceBlob = await response.blob();
+            const sourceImage = await uploadImage(sourceBlob);
+            const size = fitNodeSize(sourceImage.width, sourceImage.height);
+            const center = { x: size.width / 2 + 80, y: size.height / 2 + 80 };
+            const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const node: CanvasNodeData = {
+                id,
+                type: CanvasNodeType.Image,
+                title: context.productTitle || "商品源图",
+                position: { x: center.x - size.width / 2, y: center.y - size.height / 2 },
+                width: size.width,
+                height: size.height,
+                metadata: imageMetadata(sourceImage),
+            };
+            setNodes((prev) => [...prev, node]);
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(id);
+            setCreativeContext(context);
+            pendingCreativeContextRef.current = null;
+            sendCreativeMessage({ type: "creative.context.ready", requestId: context.requestId, sessionId: context.sessionId });
+        } catch (error) {
+            importedCreativeRequestIdRef.current = null;
+            sendCreativeMessage({ type: "creative.context.error", requestId: context.requestId, sessionId: context.sessionId, error: error instanceof Error ? error.message : "商品图片导入失败" });
+        }
+    }, [sendCreativeMessage]);
+
+    useEffect(() => {
+        const handleCreativeMessage = (event: MessageEvent<CreativeContext & { type?: string }>) => {
+            if (event.source !== window.parent || event.origin !== window.location.origin || event.data?.type !== "creative.context.open") return;
+            pendingCreativeContextRef.current = event.data;
+            if (projectLoaded) void importCreativeContext(event.data);
+        };
+        window.addEventListener("message", handleCreativeMessage);
+        const pending = window.sessionStorage.getItem("temu:creative-pending-context");
+        if (pending) {
+            try {
+                const context = JSON.parse(pending) as CreativeContext;
+                window.sessionStorage.removeItem("temu:creative-pending-context");
+                if (context.sessionId && context.assetId && context.sourceUrl) pendingCreativeContextRef.current = context;
+            } catch {
+                window.sessionStorage.removeItem("temu:creative-pending-context");
+            }
+        }
+        return () => window.removeEventListener("message", handleCreativeMessage);
+    }, [importCreativeContext, projectLoaded]);
+
+    useEffect(() => {
+        if (!projectLoaded || !pendingCreativeContextRef.current || creativeContext) return;
+        void importCreativeContext(pendingCreativeContextRef.current);
+    }, [creativeContext, importCreativeContext, projectLoaded]);
 
     useEffect(() => {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
@@ -946,6 +1054,34 @@ function InfiniteCanvasPage() {
         const id = createProject(t("canvas.defaultTitle", { count: useCanvasStore.getState().projects.length + 1 }));
         navigate(`/canvas/${id}`);
     }, [createProject, navigate, t]);
+
+    const saveCreativeVersion = useCallback(async () => {
+        if (!creativeContext || creativeSaving) return;
+        const imageNode = [...nodesRef.current].reverse().find((node) => {
+            if (node.type !== CanvasNodeType.Image) return false;
+            const primary = node.metadata?.images?.find((image) => image.id === node.metadata?.primaryImageId) || node.metadata?.images?.[0];
+            return Boolean(primary?.storageKey || primary?.content || node.metadata?.storageKey || node.metadata?.content);
+        });
+        if (!imageNode) {
+            message.warning("画布中没有可保存的图片节点");
+            return;
+        }
+        const primary = imageNode.metadata?.images?.find((image) => image.id === imageNode.metadata?.primaryImageId) || imageNode.metadata?.images?.[0];
+        const storageKey = primary?.storageKey || imageNode.metadata?.storageKey;
+        const content = primary?.content || imageNode.metadata?.content;
+        try {
+            setCreativeSaving(true);
+            const blob = storageKey ? await getImageBlob(storageKey) : content ? await (await fetch(content)).blob() : null;
+            if (!blob) throw new Error("图片内容不可读取");
+            const version = await uploadCreativeVersion(creativeContext.sessionId, blob);
+            sendCreativeMessage({ type: "creative.version.created", requestId: creativeContext.requestId, sessionId: creativeContext.sessionId, assetId: creativeContext.assetId, versionId: version.id, status: version.status });
+            message.success("已保存为 ERP 待审核版本");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "保存商品图片版本失败");
+        } finally {
+            setCreativeSaving(false);
+        }
+    }, [creativeContext, creativeSaving, message, sendCreativeMessage]);
 
     const deleteCurrentProject = useCallback(() => {
         deleteProjects([projectId]);
@@ -2762,6 +2898,9 @@ function InfiniteCanvasPage() {
                     onOpenPlugins={() => setPluginManagerOpen(true)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
+                    creativeSessionActive={Boolean(creativeContext)}
+                    creativeSaving={creativeSaving}
+                    onSaveCreativeVersion={() => void saveCreativeVersion()}
                     agentOpen={agentPanelOpen}
                     compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
                     onToggleAgent={toggleAgentPanel}
