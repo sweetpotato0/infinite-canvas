@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, encodeChannelModel, modelOptionsFromChannels, useConfigStore, useEffectiveConfig, type ModelChannel } from "@/stores/use-config-store";
 import { getImageBlob, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -134,8 +134,49 @@ type CreativeContext = {
     sourceMediaId?: number;
     sourceUrl: string;
     productTitle?: string;
+    operation?: "edit" | "generate";
+    sourceMediaType?: string;
     returnMode?: string;
+    aiProvider?: "erp";
+    channelId?: string;
+    model?: string;
 };
+
+type ERPImageChannel = {
+    id: string;
+    name: string;
+    capabilities: string[];
+    models: string[];
+    enabled: boolean;
+    ready: boolean;
+    defaultModel: string;
+};
+
+type ERPImageConfigResponse = {
+    provider: "erp";
+    ready: boolean;
+    channels: ERPImageChannel[];
+};
+
+async function loadERPImageConfig() {
+    const response = await fetch("/api/v1/creative/ai-config", { credentials: "include" });
+    const payload = (await response.json().catch(() => null)) as Partial<ERPImageConfigResponse> & { error?: string } | null;
+    if (!response.ok) throw new Error(payload?.error || "ERP AI 渠道读取失败");
+    if (!payload?.ready || !payload.channels?.length) throw new Error("ERP 尚未配置可用的 AI 图片渠道");
+    return payload as ERPImageConfigResponse;
+}
+
+function creativeSourceUrl(raw: string) {
+    const value = raw.trim();
+    if (!value || value.startsWith("data:") || value.startsWith("blob:")) return value;
+    try {
+        const parsed = new URL(value, window.location.href);
+        if (parsed.origin === window.location.origin) return parsed.href;
+        return `/api/v1/image-proxy?url=${encodeURIComponent(parsed.href)}`;
+    } catch {
+        return value;
+    }
+}
 
 type CreativeUploadResult = {
     objectKey: string;
@@ -280,7 +321,9 @@ function InfiniteCanvasPage() {
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
     const [creativeContext, setCreativeContext] = useState<CreativeContext | null>(null);
+    const [erpManaged, setErpManaged] = useState(false);
     const [creativeSaving, setCreativeSaving] = useState(false);
+    const setERPOverride = useConfigStore((state) => state.setERPOverride);
 
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
@@ -408,7 +451,34 @@ function InfiniteCanvasPage() {
         if (importedCreativeRequestIdRef.current === context.requestId) return;
         importedCreativeRequestIdRef.current = context.requestId;
         try {
-            const response = await fetch(context.sourceUrl, { credentials: "include" });
+            const erpConfig = await loadERPImageConfig();
+            const erpChannels: ModelChannel[] = erpConfig.channels
+                .filter((channel) => channel.enabled && channel.ready)
+                .map((channel) => ({
+                    id: channel.id,
+                    name: channel.name,
+                    source: "erp" as const,
+                    baseUrl: "",
+                    apiKey: "",
+                    apiFormat: "openai" as const,
+                    models: channel.models.map((name) => ({ name, capability: "image" as const })),
+                }));
+            // An ERP-hosted session is deliberately isolated from browser-local channels.
+            // The ERP gateway owns credentials, model availability, quota and billing.
+            const channels = erpChannels;
+            const firstChannel = erpChannels[0];
+            if (!firstChannel) throw new Error("ERP 尚未配置可用的 AI 图片渠道");
+            const selectedChannel = erpChannels.find((channel) => channel.id === context.channelId) || firstChannel;
+            const selectedName = context.model && selectedChannel.models.some((model) => model.name === context.model) ? context.model : selectedChannel.models[0]?.name || erpConfig.channels[0].defaultModel;
+            const selectedModel = encodeChannelModel(selectedChannel.id, selectedName);
+            setERPOverride({
+                provider: "erp",
+                channels,
+                models: modelOptionsFromChannels(channels),
+                model: selectedModel,
+                imageModel: selectedModel,
+            });
+            const response = await fetch(creativeSourceUrl(context.sourceUrl), { credentials: "include" });
             if (!response.ok) throw new Error("商品图片读取失败");
             const sourceBlob = await response.blob();
             const sourceImage = await uploadImage(sourceBlob);
@@ -431,16 +501,22 @@ function InfiniteCanvasPage() {
             setCreativeContext(context);
             pendingCreativeContextRef.current = null;
             sendCreativeMessage({ type: "creative.context.ready", requestId: context.requestId, sessionId: context.sessionId });
+            if (context.operation === "generate") {
+                message.info("参考图已导入，请在节点面板中填写提示词并生成");
+            } else {
+                message.info("商品图片已导入，可直接编辑或使用节点面板生成");
+            }
         } catch (error) {
             importedCreativeRequestIdRef.current = null;
             sendCreativeMessage({ type: "creative.context.error", requestId: context.requestId, sessionId: context.sessionId, error: error instanceof Error ? error.message : "商品图片导入失败" });
         }
-    }, [sendCreativeMessage]);
+    }, [message, sendCreativeMessage, setERPOverride]);
 
     useEffect(() => {
         const handleCreativeMessage = (event: MessageEvent<CreativeContext & { type?: string }>) => {
-            if (event.source !== window.parent || event.origin !== window.location.origin || event.data?.type !== "creative.context.open") return;
+            if (event.origin !== window.location.origin || event.data?.type !== "creative.context.open") return;
             pendingCreativeContextRef.current = event.data;
+            setErpManaged(true);
             if (projectLoaded) void importCreativeContext(event.data);
         };
         window.addEventListener("message", handleCreativeMessage);
@@ -449,13 +525,20 @@ function InfiniteCanvasPage() {
             try {
                 const context = JSON.parse(pending) as CreativeContext;
                 window.sessionStorage.removeItem("temu:creative-pending-context");
-                if (context.sessionId && context.assetId && context.sourceUrl) pendingCreativeContextRef.current = context;
+                if (context.sessionId && context.assetId && context.sourceUrl) {
+                    pendingCreativeContextRef.current = context;
+                    setErpManaged(true);
+                }
             } catch {
                 window.sessionStorage.removeItem("temu:creative-pending-context");
             }
         }
         return () => window.removeEventListener("message", handleCreativeMessage);
     }, [importCreativeContext, projectLoaded]);
+
+    useEffect(() => {
+        return () => useConfigStore.getState().clearERPOverride();
+    }, []);
 
     useEffect(() => {
         if (!projectLoaded || !pendingCreativeContextRef.current || creativeContext) return;
@@ -1953,6 +2036,10 @@ function InfiniteCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize } } : node)));
     }, []);
 
+    const handleNodeMetadataChange = useCallback((nodeId: string, patch: Partial<CanvasNodeMetadata>) => {
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
+    }, []);
+
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
         uploadTargetRef.current = { nodeId, position };
         imageInputRef.current?.click();
@@ -2879,7 +2966,7 @@ function InfiniteCanvasPage() {
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
-                <CanvasTopBar
+                    <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
@@ -2899,6 +2986,7 @@ function InfiniteCanvasPage() {
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     creativeSessionActive={Boolean(creativeContext)}
+                    erpManaged={erpManaged}
                     creativeSaving={creativeSaving}
                     onSaveCreativeVersion={() => void saveCreativeVersion()}
                     agentOpen={agentPanelOpen}
@@ -2983,6 +3071,7 @@ function InfiniteCanvasPage() {
                             onResize={handleNodeResize}
                             onResizeEnd={handleNodeResizeEnd}
                             onContentChange={handleNodeContentChange}
+                            onMetadataChange={handleNodeMetadataChange}
                             onTitleChange={handleNodeTitleChange}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}

@@ -269,6 +269,54 @@ function parseImagePayload(payload: ImageApiResponse) {
     return images;
 }
 
+function erpImageRequestTarget(config: AiConfig) {
+    const value = config.model || config.imageModel;
+    const separator = value.indexOf("::");
+    return {
+        channelId: separator >= 0 ? value.slice(0, separator) : config.channels[0]?.id || "",
+        model: separator >= 0 ? value.slice(separator + 2) : value,
+    };
+}
+
+async function requestERPImageGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
+    const target = erpImageRequestTarget(config);
+    const response = await axios.post<ImageApiResponse>(
+        "/api/v1/creative/ai/images/generations",
+        {
+            channelId: target.channelId,
+            model: target.model,
+            prompt: withSystemPrompt(config, prompt),
+            n: Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.count)) || 1))),
+            quality: normalizeQuality(config.quality),
+            size: resolveRequestSize(normalizeQuality(config.quality), config.size),
+            background: normalizeBackground(config.background),
+        },
+        { signal: options?.signal, withCredentials: true },
+    );
+    return parseImagePayload(response.data);
+}
+
+async function requestERPImageEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
+    const target = erpImageRequestTarget(config);
+    const formData = new FormData();
+    formData.set("channelId", target.channelId);
+    formData.set("model", target.model);
+    formData.set("prompt", withSystemPrompt(config, buildImageReferencePromptText(prompt, references)));
+    formData.set("n", String(Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.count)) || 1)))));
+    const requestSize = resolveRequestSize(normalizeQuality(config.quality), config.size);
+    if (requestSize) formData.set("size", requestSize);
+    const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    files.forEach((file) => formData.append("image", file));
+    if (mask) {
+        formData.set("mask", await dataUrlToFile({ ...mask, dataUrl: await imageToDataUrl(mask) }));
+    }
+    const response = await axios.post<ImageApiResponse>("/api/v1/creative/ai/images/edits", formData, {
+        signal: options?.signal,
+        withCredentials: true,
+    });
+    return parseImagePayload(response.data);
+}
+
 function readApiErrorMessage(value: unknown): string {
     if (!value) return "";
     if (typeof value === "string") {
@@ -716,6 +764,13 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    if (config.provider === "erp") {
+        try {
+            return await requestERPImageGeneration(config, prompt, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("requestFailed")));
+        }
+    }
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
@@ -774,6 +829,13 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    if (config.provider === "erp") {
+        try {
+            return await requestERPImageEdit(config, prompt, references, mask, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("requestFailed")));
+        }
+    }
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);

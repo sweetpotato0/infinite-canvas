@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Palette, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -8,7 +8,7 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
-import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
@@ -43,6 +43,7 @@ type CanvasNodeProps = {
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onResizeEnd: (nodeId: string) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    onMetadataChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (nodeId: string, imageId: string) => void;
@@ -67,6 +68,7 @@ type NodeContentRendererProps = {
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     pluginContext?: CanvasNodeContext | null;
     onContentChange: (nodeId: string, content: string) => void;
+    onMetadataChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
@@ -107,6 +109,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onResize,
     onResizeEnd,
     onContentChange,
+    onMetadataChange,
     onTitleChange,
     onToggleBatch,
     onSetBatchPrimary,
@@ -394,6 +397,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         pluginContext={pluginContext}
                         mentionReferences={mentionReferences}
                         onContentChange={onContentChange}
+                        onMetadataChange={onMetadataChange}
                         onStopEditing={() => setIsEditingContent(false)}
                         onRetry={onRetry}
                         onGenerateImage={onGenerateImage}
@@ -514,10 +518,22 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onMetadataChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const fontSize = node.metadata?.fontSize || 14;
-    const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
+    const textStyle = {
+        fontFamily: node.metadata?.fontFamily || "inherit",
+        fontSize: `${fontSize}px`,
+        fontWeight: node.metadata?.fontWeight || 400,
+        fontStyle: node.metadata?.fontStyle || "normal",
+        textDecoration: node.metadata?.textDecoration || "none",
+        textAlign: node.metadata?.textAlign || "left",
+        lineHeight: node.metadata?.lineHeight || 1.65,
+        letterSpacing: `${node.metadata?.letterSpacing || 0}px`,
+        color: node.metadata?.textColor || theme.node.text,
+        backgroundColor: node.metadata?.textBackgroundColor || "transparent",
+        boxSizing: "border-box",
+    } as React.CSSProperties;
 
     return (
         <div className="flex h-full w-full flex-col overflow-hidden pt-8">
@@ -537,6 +553,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                 <ImageIcon className="size-3.5" />
                 {t("canvas.node.generate")}
             </button>
+            <TextStylePopover node={node} theme={theme} onMetadataChange={onMetadataChange} />
             {isEditingContent ? (
                 <CanvasResourceMentionTextarea
                     ref={textareaRef}
@@ -563,6 +580,64 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>{t("canvas.node.editText")}</span>}
                 </div>
             )}
+        </div>
+    );
+}
+
+function TextStylePopover({ node, theme, onMetadataChange }: { node: CanvasNodeData; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onMetadataChange: NodeContentRendererProps["onMetadataChange"] }) {
+    const [open, setOpen] = useState(false);
+    const metadata = node.metadata || {};
+    const update = (patch: Partial<CanvasNodeMetadata>) => onMetadataChange(node.id, patch);
+    const fieldClass = "h-8 rounded-lg border bg-transparent px-2 text-xs outline-none";
+    const fieldStyle = { borderColor: theme.node.stroke, color: theme.node.text };
+
+    return (
+        <div className="absolute left-3 top-3 z-20" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium backdrop-blur-md transition hover:opacity-100"
+                style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
+                onClick={() => setOpen((current) => !current)}
+                title="文字样式"
+                aria-label="文字样式"
+            >
+                <Palette className="size-3.5" />
+                样式
+            </button>
+            {open ? (
+                <div className="absolute left-0 top-10 w-80 rounded-2xl border p-3 shadow-2xl" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }} onClick={(event) => event.stopPropagation()}>
+                    <div className="mb-3 text-sm font-semibold">文字样式</div>
+                    <div className="grid grid-cols-[1fr_88px] gap-2">
+                        <select className={fieldClass} style={fieldStyle} value={metadata.fontFamily || "inherit"} onChange={(event) => update({ fontFamily: event.target.value === "inherit" ? undefined : event.target.value })}>
+                            <option value="inherit">默认字体</option>
+                            <option value="Arial, sans-serif">Arial</option>
+                            <option value="Georgia, serif">Georgia</option>
+                            <option value="Courier New, monospace">等宽字体</option>
+                        </select>
+                        <input className={fieldClass} style={fieldStyle} type="number" min={8} max={160} value={metadata.fontSize || 14} onChange={(event) => update({ fontSize: Math.min(160, Math.max(8, Number(event.target.value) || 14)) })} />
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-2">
+                        <button type="button" className={fieldClass} style={{ ...fieldStyle, fontWeight: 700 }} onClick={() => update({ fontWeight: metadata.fontWeight === 700 ? 400 : 700 })}>粗体</button>
+                        <button type="button" className={fieldClass} style={{ ...fieldStyle, fontStyle: "italic" }} onClick={() => update({ fontStyle: metadata.fontStyle === "italic" ? "normal" : "italic" })}>斜体</button>
+                        <button type="button" className={fieldClass} style={{ ...fieldStyle, textDecoration: "underline" }} onClick={() => update({ textDecoration: metadata.textDecoration === "underline" ? "none" : "underline" })}>下划线</button>
+                        <select className={fieldClass} style={fieldStyle} value={metadata.textDecoration === "line-through" ? "line-through" : "none"} onChange={(event) => update({ textDecoration: event.target.value as CanvasNodeMetadata["textDecoration"] })}>
+                            <option value="none">无删除线</option>
+                            <option value="line-through">删除线</option>
+                        </select>
+                    </div>
+                    <div className="mt-3 grid grid-cols-4 gap-2">
+                        {(["left", "center", "right", "justify"] as const).map((value) => <button key={value} type="button" className={fieldClass} style={{ ...fieldStyle, background: metadata.textAlign === value ? theme.toolbar.activeBg : undefined }} onClick={() => update({ textAlign: value })}>{({ left: "左对齐", center: "居中", right: "右对齐", justify: "两端" })[value]}</button>)}
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                        <label className="flex items-center justify-between gap-2">文字颜色<input type="color" value={metadata.textColor || "#242529"} onChange={(event) => update({ textColor: event.target.value })} /></label>
+                        <label className="flex items-center justify-between gap-2">背景颜色<input type="color" value={metadata.textBackgroundColor || "#ffffff"} onChange={(event) => update({ textBackgroundColor: event.target.value })} /></label>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                        <label className="text-xs">行高<input className={`${fieldClass} mt-1 w-full`} style={fieldStyle} type="number" min={0.8} max={4} step={0.1} value={metadata.lineHeight || 1.65} onChange={(event) => update({ lineHeight: Math.min(4, Math.max(0.8, Number(event.target.value) || 1.65)) })} /></label>
+                        <label className="text-xs">字间距<input className={`${fieldClass} mt-1 w-full`} style={fieldStyle} type="number" min={-10} max={40} step={1} value={metadata.letterSpacing || 0} onChange={(event) => update({ letterSpacing: Math.min(40, Math.max(-10, Number(event.target.value) || 0)) })} /></label>
+                    </div>
+                </div>
+            ) : null}
         </div>
     );
 }

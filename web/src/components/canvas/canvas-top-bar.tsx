@@ -29,6 +29,7 @@ export function CanvasTopBar({
     onUndo,
     onRedo,
     creativeSessionActive,
+    erpManaged,
     creativeSaving,
     onSaveCreativeVersion,
     agentOpen,
@@ -54,6 +55,7 @@ export function CanvasTopBar({
     onUndo: () => void;
     onRedo: () => void;
     creativeSessionActive: boolean;
+    erpManaged: boolean;
     creativeSaving: boolean;
     onSaveCreativeVersion: () => void;
     agentOpen: boolean;
@@ -157,7 +159,7 @@ export function CanvasTopBar({
                             </Button>
                         </Tooltip>
                     ) : null}
-                    <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
+                    <UserStatusActions variant="canvas" erpManaged={erpManaged} onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
                     <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
                     <Button
                         type="text"

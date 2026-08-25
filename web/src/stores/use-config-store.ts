@@ -18,6 +18,7 @@ export type ChannelModel = {
 export type ModelChannel = {
     id: string;
     name: string;
+    source?: "browser" | "erp";
     baseUrl: string;
     apiKey: string;
     apiFormat: ApiCallFormat;
@@ -25,6 +26,7 @@ export type ModelChannel = {
 };
 
 export type AiConfig = {
+    provider: "browser" | "erp";
     channelMode: "remote" | "local";
     baseUrl: string;
     apiKey: string;
@@ -68,6 +70,7 @@ const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 
 export const defaultConfig: AiConfig = {
+    provider: "browser",
     channelMode: "local",
     baseUrl: OPENAI_BASE_URL,
     apiKey: "",
@@ -120,6 +123,7 @@ export const defaultWebdavSyncConfig: WebdavSyncConfig = {
 
 type ConfigStore = {
     config: AiConfig;
+    erpOverride: Partial<AiConfig> | null;
     webdav: WebdavSyncConfig;
     isConfigOpen: boolean;
     configTab: ConfigTabKey;
@@ -130,6 +134,8 @@ type ConfigStore = {
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
     setConfigDialogOpen: (isOpen: boolean) => void;
     clearPromptContinue: () => void;
+    setERPOverride: (override: Partial<AiConfig>) => void;
+    clearERPOverride: () => void;
 };
 
 const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo"];
@@ -169,14 +175,25 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
+    if (currentModel && modelMatchesCapability(config, currentModel, capability) && isSelectableChannel(config, currentModel, capability)) return currentModel;
     if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
     return fallbackModel;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    return config.channels
+        .filter((channel) => isSelectableChannelSource(channel, config, capability))
+        .flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+}
+
+function isSelectableChannelSource(channel: ModelChannel, config: AiConfig, capability: ModelCapability) {
+    return !(config.provider === "erp" && capability === "image") || channel.source === "erp";
+}
+
+function isSelectableChannel(config: AiConfig, value: string, capability: ModelCapability) {
+    const channel = resolveModelChannel(config, value);
+    return isSelectableChannelSource(channel, config, capability);
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -185,6 +202,10 @@ export function resolveModelScript(config: AiConfig, value: string) {
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
+    if (config.provider === "erp") {
+        const channel = resolveModelChannel(config, model);
+        return Boolean(model.trim() && channel.models.length);
+    }
     const channel = resolveModelChannel(config, model);
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
@@ -193,6 +214,7 @@ export const useConfigStore = create<ConfigStore>()(
     persist(
         (set, get) => ({
             config: defaultConfig,
+            erpOverride: null,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
             configTab: "channels",
@@ -215,6 +237,8 @@ export const useConfigStore = create<ConfigStore>()(
             openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
             setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
             clearPromptContinue: () => set({ shouldPromptContinue: false }),
+            setERPOverride: (override) => set({ erpOverride: override }),
+            clearERPOverride: () => set({ erpOverride: null }),
         }),
         {
             name: CONFIG_STORE_KEY,
@@ -259,7 +283,8 @@ export const useConfigStore = create<ConfigStore>()(
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
-    return useMemo(() => ({ ...config, channelMode: "local" as const }), [config]);
+    const erpOverride = useConfigStore((state) => state.erpOverride);
+    return useMemo(() => ({ ...config, ...(erpOverride || {}), channelMode: "local" as const }), [config, erpOverride]);
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */
@@ -282,6 +307,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
+        source: channel?.source || "browser",
         baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
         apiKey: channel?.apiKey || "",
         apiFormat,

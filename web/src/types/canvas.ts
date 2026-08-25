@@ -44,6 +44,15 @@ export type CanvasNodeMetadata = {
     status?: CanvasNodeStatus;
     errorDetails?: string;
     fontSize?: number;
+    fontFamily?: string;
+    fontWeight?: number;
+    fontStyle?: "normal" | "italic";
+    textDecoration?: "none" | "underline" | "line-through";
+    textAlign?: "left" | "center" | "right" | "justify";
+    textColor?: string;
+    textBackgroundColor?: string;
+    lineHeight?: number;
+    letterSpacing?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
     model?: string;

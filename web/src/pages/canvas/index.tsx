@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button } from "antd";
 import { Download, FileUp, Plus } from "lucide-react";
@@ -13,6 +13,7 @@ import type { CanvasExportFile } from "@/types/canvas-export";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { useConfigStore } from "@/stores/use-config-store";
 
 export default function CanvasPage() {
     const { message } = App.useApp();
@@ -27,6 +28,20 @@ export default function CanvasPage() {
     const importProject = useCanvasStore((state) => state.importProject);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
+    const clearERPOverride = useConfigStore((state) => state.clearERPOverride);
+
+    useEffect(() => {
+        clearERPOverride();
+    }, [clearERPOverride]);
+
+    const openCreativeProject = useCallback(() => {
+        if (!hydrated || autoOpenRef.current) return;
+        const raw = window.sessionStorage.getItem("temu:creative-pending-context");
+        if (!raw) return;
+        autoOpenRef.current = true;
+        const id = createProject("商品创作工作区");
+        navigate(`/canvas/${id}`);
+    }, [createProject, hydrated, navigate]);
 
     const mode = searchParams.get("mode");
     const agentMode = mode === "new" || mode === "recent" || mode === "choose";
@@ -37,13 +52,18 @@ export default function CanvasPage() {
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
 
     useEffect(() => {
-        if (!hydrated || autoOpenRef.current) return;
-        const raw = window.sessionStorage.getItem("temu:creative-pending-context");
-        if (!raw) return;
-        autoOpenRef.current = true;
-        const id = createProject("商品创作工作区");
-        navigate(`/canvas/${id}`);
-    }, [createProject, hydrated, navigate]);
+        openCreativeProject();
+    }, [openCreativeProject]);
+
+    useEffect(() => {
+        const handleCreativeContext = (event: MessageEvent<{ type?: string }>) => {
+            if (event.origin !== window.location.origin || event.data?.type !== "creative.context.open") return;
+            window.sessionStorage.setItem("temu:creative-pending-context", JSON.stringify(event.data));
+            openCreativeProject();
+        };
+        window.addEventListener("message", handleCreativeContext);
+        return () => window.removeEventListener("message", handleCreativeContext);
+    }, [openCreativeProject]);
     const importCanvas = async (file?: File) => {
         if (!file) return;
         try {
