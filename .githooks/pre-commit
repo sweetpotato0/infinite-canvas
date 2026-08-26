@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+changed_files="$(git diff --cached --name-only --diff-filter=ACMRTUXB)"
+build_canvas="false"
+
+while IFS= read -r path; do
+  [[ -n "${path}" ]] || continue
+  case "${path}" in
+    web/*|plugins/canvas/*|package.json|package-lock.json|pnpm-lock.yaml|yarn.lock)
+      build_canvas="true"
+      ;;
+  esac
+done <<< "${changed_files}"
+
+if [[ "${build_canvas}" != "true" ]]; then
+  echo "pre-commit: no infinite-canvas web changes, skipping build"
+  exit 0
+fi
+
+if [[ ! -x "${REPO_ROOT}/web/node_modules/.bin/vite" ]]; then
+  echo "pre-commit: infinite-canvas dependencies are missing; run 'cd web && npm install --legacy-peer-deps --package-lock=false' first" >&2
+  exit 1
+fi
+
+echo "pre-commit: building infinite-canvas"
+(cd "${REPO_ROOT}/web" && VITE_BASE=/canvas/ npm run build)
+git add -- "${REPO_ROOT}/web/dist"
