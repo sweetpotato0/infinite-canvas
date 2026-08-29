@@ -10,6 +10,8 @@ build_canvas="false"
 while IFS= read -r path; do
   [[ -n "${path}" ]] || continue
   case "${path}" in
+    web/dist/*)
+      ;;
     web/*|plugins/canvas/*|package.json|package-lock.json|pnpm-lock.yaml|yarn.lock)
       build_canvas="true"
       ;;
