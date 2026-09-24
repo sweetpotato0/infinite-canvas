@@ -4,6 +4,7 @@ import i18n from "@/i18n";
 import { buildApiUrl, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type RequestOptions = { signal?: AbortSignal };
+const USER_CONFIG_VIDEO_PROXY_PATH = "/api/v1/creative/ai/user-config/videos";
 
 export type PluginHttpOptions = {
     headers?: Record<string, string>;
@@ -37,17 +38,39 @@ function pluginHeaders(extra?: Record<string, string>, hasJsonBody = false): Rec
     return { ...headers, ...extra };
 }
 
-function pluginUrl(config: AiConfig, path: string) {
-    if (/^https?:/i.test(path)) return path;
-    return buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`);
+function rewriteUserConfigVideoUrl(config: AiConfig, path: string, capability?: ModelCapability) {
+    if (capability !== "video" || config.apiFormat !== "openai") return null;
+    if (path.startsWith(USER_CONFIG_VIDEO_PROXY_PATH)) return path;
+    let target: URL;
+    let configured: URL;
+    try {
+        target = new URL(path);
+        configured = new URL(config.baseUrl);
+    } catch {
+        return null;
+    }
+    if (target.origin !== configured.origin) return null;
+    const pathname = target.pathname.replace(/\/+$/, "");
+    const marker = "/v1/videos";
+    const markerIndex = pathname.lastIndexOf(marker);
+    if (markerIndex < 0) return null;
+    const suffix = pathname.slice(markerIndex + marker.length);
+    return `${USER_CONFIG_VIDEO_PROXY_PATH}${suffix}${target.search}`;
 }
 
-function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHttp {
+function pluginUrl(config: AiConfig, path: string, capability?: ModelCapability) {
+    if (path.startsWith(USER_CONFIG_VIDEO_PROXY_PATH)) return path;
+    const resolved = /^https?:/i.test(path) ? path : buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`);
+    return rewriteUserConfigVideoUrl(config, resolved, capability) || resolved;
+}
+
+function createPluginHttp(config: AiConfig, capability: ModelCapability, options?: RequestOptions): PluginHttp {
     const run = async (method: "get" | "post", path: string, body: unknown, opts?: PluginHttpOptions) => {
         const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+        const url = pluginUrl(config, path, capability);
         const response = await axios.request({
             method,
-            url: pluginUrl(config, path),
+            url,
             data: method === "post" ? body : undefined,
             params: opts?.params,
             headers: pluginHeaders({ Authorization: `Bearer ${config.apiKey}`, ...opts?.headers }, method === "post" && !isForm && body !== undefined),
@@ -57,16 +80,24 @@ function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHtt
         return response.data;
     };
     return {
-        url: (path) => pluginUrl(config, path),
+        url: (path) => pluginUrl(config, path, capability),
         post: (path, body, opts) => run("post", path, body, opts),
         get: (path, opts) => run("get", path, undefined, opts),
     };
 }
 
 /** Raw request with no automatic auth header — the script controls method, url, headers, body entirely. */
-function createPluginRequest(config: AiConfig, options?: RequestOptions) {
+function createPluginRequest(config: AiConfig, capability: ModelCapability, options?: RequestOptions) {
     return async (requestConfig: AxiosRequestConfig & { url: string }) => {
-        const response = await axios.request({ ...requestConfig, url: pluginUrl(config, requestConfig.url), signal: options?.signal });
+        const url = pluginUrl(config, requestConfig.url, capability);
+        const headers = { ...(requestConfig.headers as Record<string, string> | undefined) };
+        if (url.startsWith(USER_CONFIG_VIDEO_PROXY_PATH)) {
+            delete headers.Authorization;
+            delete headers.authorization;
+            headers["X-Canvas-AI-Base-URL"] = config.baseUrl;
+            headers["X-Canvas-AI-API-Key"] = config.apiKey;
+        }
+        const response = await axios.request({ ...requestConfig, url, headers, signal: options?.signal });
         return response.data;
     };
 }
@@ -113,8 +144,8 @@ function createPoll(signal?: AbortSignal) {
  */
 export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<T> {
     const { config } = args;
-    const http = createPluginHttp(config, { signal: args.signal });
-    const request = createPluginRequest(config, { signal: args.signal });
+    const http = createPluginHttp(config, args.capability, { signal: args.signal });
+    const request = createPluginRequest(config, args.capability, { signal: args.signal });
     const poll = createPoll(args.signal);
     const runner = new Function(
         "prompt",
@@ -257,11 +288,17 @@ const task = await request({
   headers,
   data: { model, prompt, seconds: params.seconds },
 });
-return await poll(
+const completed = await poll(
   () => request({ method: "get", url: \`\${baseUrl}/v1/videos/\${task.id}\`, headers }),
-  (state) => state.status === "completed" ? { url: state.video_url || state.url } : null,
+  (state) => state.status === "completed" ? state : null,
   { intervalMs: 2500, timeoutMs: 300000 },
-);`,
+);
+return await request({
+  method: "get",
+  url: \`\${baseUrl}/v1/videos/\${completed.id || task.id}/content\`,
+  headers,
+  responseType: "blob",
+});`,
         },
         {
             label: i18n.t("modelPlugin.templates.gemini"),
